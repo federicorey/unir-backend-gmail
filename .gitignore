@@ -3,3 +3,6 @@ credentials.json
 *.venv
 __pycache__/
 instance/
+*.pyc
+
+token_*.json
