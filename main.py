@@ -21,6 +21,10 @@ from gmail_service import (
 )
 
 app = FastAPI()
+logging.basicConfig(
+    level=logging.INFO,  # mostrará logs tipo INFO, WARNING, ERROR
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # ---- CONFIG ----
@@ -80,6 +84,9 @@ def auth_callback(code: str):
 
     USERS[email] = {"token_info": token_info}
 
+    resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", label_ids=["INBOX"])
+    USERS[email]["last_history_id"] = int(resp["historyId"])
+
     # 🔹 Guarda el token en un archivo para persistencia
     with open(f"token_{email}.json", "w") as f:
         json.dump(token_info, f)
@@ -101,6 +108,7 @@ async def webhook_gmail(request: Request, background_tasks: BackgroundTasks):
       "subscription": "projects/.../subscriptions/..."
     }
     """
+    print("✅ Webhook /webhook/gmail fue llamado")
     body = await request.json()
     if "message" not in body:
         raise HTTPException(400, "invalid pubsub push")
@@ -120,28 +128,39 @@ async def webhook_gmail(request: Request, background_tasks: BackgroundTasks):
 
 
 def handle_notification(email: str, history_id: int):
-    # recuperá credenciales del usuario
+    print(f"🔔 [Webhook recibido] email={email}, history_id={history_id}")
+
     info = USERS.get(email)
     if not info:
-        logger.warning("No credentials for %s", email)
+        print("⚠️ No hay credenciales guardadas para ese usuario")
         return
 
     creds = load_credentials_from_token(info["token_info"])
     service = build_gmail_service(creds)
 
-    last_known = info.get("last_history_id", history_id - 1)
+    last_known = info.get("last_history_id")
+    if not last_known:
+        # Si es la primera vez, inicializar con el que llegó
+        info["last_history_id"] = history_id
+        print("🆕 No había history_id previo, se inicializa con el actual")
+        return
+
     try:
         messages = fetch_messages_by_history(service, start_history_id=last_known)
     except Exception as e:
-        logger.exception("Error fetching by history: %s", e)
-        # si startHistoryId demasiado viejo -> hacer sync completo o listar mensajes recientes
-        messages = []
-    # procesá/normalizá cada mensaje
+        print(f"❌ Error en fetch_messages_by_history: {e}")
+        # Resetear el tracking si el history_id caducó
+        if "notFound" in str(e):
+            print("⚠️ Re-suscribiendo con watch() para obtener nuevo history_id...")
+            resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", ["INBOX"])
+            info["last_history_id"] = int(resp["historyId"])
+        return
+
     for m in messages:
-        logger.info("New mail for %s: %s - %s", email, m["from"], m["subject"])
-        # guardá en DB / push a la cola interna / normalizar
-    # actualizar last_history_id
+        print(f"📬 Nuevo mail: {m['from']} - {m['subject']}")
+
     info["last_history_id"] = history_id
+
 
 
 # --- Endpoint para enviar mail (ejemplo) ---
@@ -208,4 +227,22 @@ def list_recent_mails(email: str, limit: int = 10):
         mails.append(parsed)
 
     return {"email": email, "messages": mails}
+
+@app.post("/watch/gmail/reset")
+def reset_watch(email: str):
+    info = USERS.get(email)
+    if not info:
+        raise HTTPException(404, "user not authorized")
+
+    creds = load_credentials_from_token(info["token_info"])
+    service = build_gmail_service(creds)
+
+    resp = create_watch(
+        service,
+        "projects/unir-gmail/topics/gmail_notifications",
+        label_ids=["INBOX"]
+    )
+
+    USERS[email]["last_history_id"] = int(resp["historyId"])
+    return {"status": "watch_reset", "watch": resp}
 
