@@ -159,27 +159,31 @@ def handle_notification(email: str, history_id: int):
         return
 
     #print(messages)
-    for m in messages:
-        print(f"📬 Nuevo mail: {m['from']} - {m['subject']}")
+    if not messages:
+        print("⚠️ No se encontraron mensajes nuevos")
+        return
 
-        # Construir mensaje unificado
+    # Tomar solo el último mensaje
+    m = messages[-1]
+    print(f"📬 Último mail: {m['from']} - {m['subject']}")
+    # Construir mensaje unificado
 
-        unified_message = {
-            "channel": "gmail",
-            "sender": m["from"],
-            "message": m.get("snippet") or m.get("body", ""),
-            "timestamp": m.get("publishTime") or datetime.utcnow().isoformat(),
-            "message_id": m.get("id"),
-            "message_type": "email"
-        }
-        print(f"body {unified_message}")
+    unified_message = {
+        "channel": "gmail",
+        "sender": m["from"],
+        "message": m.get("snippet") or m.get("body", ""),
+        "timestamp": m.get("publishTime") or datetime.utcnow().isoformat(),
+        "message_id": m.get("id"),
+        "message_type": "email"
+    }
+    print(f"body {unified_message}")
 
-        # Llamar al forward_to_core de manera asíncrona
-        try:
-            forward_to_core(unified_message)
-            print(f"✅ Mensaje reenviado al Core: {m['subject']}")
-        except Exception as e:
-            print(f"❌ Error reenviando mensaje al Core: {e}")
+    # Llamar al forward_to_core de manera asíncrona
+    try:
+        forward_to_core(unified_message)
+        print(f"✅ Mensaje reenviado al Core: {m['subject']}")
+    except Exception as e:
+        print(f"❌ Error reenviando mensaje al Core: {e}")
 
     info["last_history_id"] = history_id
 
