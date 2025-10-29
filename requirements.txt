@@ -6,3 +6,4 @@ google-auth-oauthlib
 google-auth-httplib2
 google-cloud-pubsub    # opcional si usás cliente Pub/Sub directo
 python-multipart       # si necesitás forms
+httpx                  # para comunicación HTTP con Core API

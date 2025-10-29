@@ -27,15 +27,20 @@ def load_credentials_from_token(token_info: Dict) -> Credentials:
     (En producción guardá y recuperá esto desde DB cifrado).
     """
     creds = Credentials(
-        token=token_info.get("token"),
+        token=token_info["token"],
         refresh_token=token_info.get("refresh_token"),
-        token_uri=token_info.get("token_uri", "https://oauth2.googleapis.com/token"),
-        client_id=token_info.get("client_id"),
-        client_secret=token_info.get("client_secret"),
-        scopes=token_info.get("scopes", SCOPES),
+        token_uri=token_info["token_uri"],
+        client_id=token_info["client_id"],
+        client_secret=token_info["client_secret"],
+        scopes=token_info["scopes"],
     )
-    if creds and creds.expired and creds.refresh_token:
+
+    if creds.expired and creds.refresh_token:
         creds.refresh(Request())
+        logging.info("🔄 Token refrescado automáticamente.")
+        # Guardar el nuevo token actualizado en USERS[email] o en tu DB
+        token_info["token"] = creds.token
+
     return creds
 
 

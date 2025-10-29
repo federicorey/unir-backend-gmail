@@ -14,11 +14,14 @@ from google.auth.transport.requests import Request as GoogleRequest
 from datetime import datetime
 from email_model import EmailRequest
 import email.utils as email_utils
+from publish import forward_to_core
+import asyncio
 
 from gmail_service import (
     SCOPES, build_gmail_service, create_watch, load_credentials_from_token,
     fetch_messages_by_history, send_message
 )
+from core_api_client import CoreAPIClient
 
 app = FastAPI()
 logging.basicConfig(
@@ -95,7 +98,6 @@ def auth_callback(code: str):
 
 
 
-
 # --- Webhook para recibir Pub/Sub push desde tu subscription (Gmail -> Pub/Sub -> push -> este endpoint) ---
 @app.post("/webhook/gmail")
 async def webhook_gmail(request: Request, background_tasks: BackgroundTasks):
@@ -156,8 +158,28 @@ def handle_notification(email: str, history_id: int):
             info["last_history_id"] = int(resp["historyId"])
         return
 
+    #print(messages)
     for m in messages:
         print(f"📬 Nuevo mail: {m['from']} - {m['subject']}")
+
+        # Construir mensaje unificado
+
+        unified_message = {
+            "channel": "gmail",
+            "sender": m["from"],
+            "message": m.get("snippet") or m.get("body", ""),
+            "timestamp": m.get("publishTime") or datetime.utcnow().isoformat(),
+            "message_id": m.get("id"),
+            "message_type": "email"
+        }
+        print(f"body {unified_message}")
+
+        # Llamar al forward_to_core de manera asíncrona
+        try:
+            forward_to_core(unified_message)
+            print(f"✅ Mensaje reenviado al Core: {m['subject']}")
+        except Exception as e:
+            print(f"❌ Error reenviando mensaje al Core: {e}")
 
     info["last_history_id"] = history_id
 
