@@ -22,6 +22,7 @@ from gmail_service import (
     fetch_messages_by_history, send_message
 )
 from core_api_client import CoreAPIClient
+from googleapiclient.errors import HttpError
 
 app = FastAPI()
 logging.basicConfig(
@@ -149,18 +150,20 @@ def handle_notification(email: str, history_id: int):
 
     try:
         messages = fetch_messages_by_history(service, start_history_id=last_known)
-    except Exception as e:
+    except HttpError as e:
         print(f"❌ Error en fetch_messages_by_history: {e}")
-        # Resetear el tracking si el history_id caducó
-        if "notFound" in str(e):
+        if e.resp.status == 404 and "historyId" in str(e):
             print("⚠️ Re-suscribiendo con watch() para obtener nuevo history_id...")
             resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", ["INBOX"])
             info["last_history_id"] = int(resp["historyId"])
         return
+    except Exception as e:
+        print(f"❌ Error en fetch_messages_by_history: {e}")
+        return
 
-    #print(messages)
     if not messages:
         print("⚠️ No se encontraron mensajes nuevos")
+        info["last_history_id"] = history_id
         return
 
     # Tomar solo el último mensaje

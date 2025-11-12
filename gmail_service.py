@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from typing import Dict, List, Optional
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
@@ -146,7 +147,13 @@ def fetch_messages_by_history(service, start_history_id: int) -> List[Dict]:
 
     # ahora traemos cada mensaje completo
     for mid in message_ids:
-        m = service.users().messages().get(userId="me", id=mid, format="full").execute()
+        try:
+            m = service.users().messages().get(userId="me", id=mid, format="full").execute()
+        except HttpError as err:
+            if err.resp.status == 404:
+                logger.warning("Skipping message %s: %s", mid, err)
+                continue
+            raise
         parsed = parse_gmail_message(m)
         result.append(parsed)
     return result
