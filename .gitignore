@@ -3,5 +3,5 @@
 __pycache__/
 instance/
 *.pyc
-
+*.venv
 token_*.json
