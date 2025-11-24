@@ -4,6 +4,7 @@ import json
 import logging
 import base64
 from wsgiref import headers
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -42,6 +43,8 @@ USERS = {}  # user_email -> {client_id, client_secret, token_info..., last_histo
 
 import glob
 
+NGROK_BASE_URL = "https://kimora-unmalicious-brady.ngrok-free.dev"
+OAUTH_REDIRECT_URI_DEFAULT = f"{NGROK_BASE_URL}/auth/gmail/callback"
 
 # Cargar tokens guardados (si existen)
 for path in glob.glob("token_*.json"):
@@ -57,7 +60,7 @@ def auth_start(state: str = "app"):
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8000/auth/gmail/callback"),
+        redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8001/auth/gmail/callback"),
     )
     auth_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     return RedirectResponse(auth_url)
@@ -65,38 +68,51 @@ def auth_start(state: str = "app"):
 
 @app.get("/auth/gmail/callback")
 def auth_callback(code: str):
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8000/auth/gmail/callback"),
-    )
-    flow.fetch_token(code=code)
-    creds = flow.credentials
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", OAUTH_REDIRECT_URI_DEFAULT)
+    logger.info(f"🔐 Callback OAuth recibido con redirect_uri: {redirect_uri}")
+    
+    try:
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+        flow.fetch_token(code=code)
+        creds = flow.credentials
 
-    service = build_gmail_service(creds)
-    profile = service.users().getProfile(userId="me").execute()
-    email = profile.get("emailAddress")
+        service = build_gmail_service(creds)
+        profile = service.users().getProfile(userId="me").execute()
+        email = profile.get("emailAddress")
 
-    token_info = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
-    }
+        token_info = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+        }
 
-    USERS[email] = {"token_info": token_info}
+        USERS[email] = {"token_info": token_info}
 
-    resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", label_ids=["INBOX"])
-    USERS[email]["last_history_id"] = int(resp["historyId"])
+        resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", label_ids=["INBOX"])
+        USERS[email]["last_history_id"] = int(resp["historyId"])
 
-    # 🔹 Guarda el token en un archivo para persistencia
-    with open(f"token_{email}.json", "w") as f:
-        json.dump(token_info, f)
+        # 🔹 Guarda el token en un archivo para persistencia
+        with open(f"token_{email}.json", "w") as f:
+            json.dump(token_info, f)
 
-    return {"status": "ok", "email": email, "creds": token_info}
-
+        logger.info(f"✅ OAuth exitoso para {email}")
+        
+        # Redirigir al frontend con parámetro de éxito
+        frontend_redirect = f"{FRONTEND_BASE}/linkedAccounts?gmail_connected=true&email={email}"
+        return RedirectResponse(url=frontend_redirect)
+        
+    except Exception as e:
+        logger.error(f"❌ Error en callback OAuth: {str(e)}")
+        # Redirigir al frontend con error
+        frontend_redirect = f"{FRONTEND_BASE}/linkedAccounts?gmail_connected=false&error={str(e)}"
+        return RedirectResponse(url=frontend_redirect)
 
 
 # --- Webhook para recibir Pub/Sub push desde tu subscription (Gmail -> Pub/Sub -> push -> este endpoint) ---

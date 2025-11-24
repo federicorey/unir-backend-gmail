@@ -5,3 +5,4 @@ instance/
 *.pyc
 *.venv
 token_*.json
+credentials.json
