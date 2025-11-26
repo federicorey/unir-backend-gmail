@@ -5,7 +5,7 @@ import logging
 import base64
 from wsgiref import headers
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Body
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from google_auth_oauthlib.flow import Flow
@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 CLIENT_SECRETS_FILE = "credentials.json"  # descargada desde Cloud Console
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC")  # projects/<PROJECT>/topics/<topic>
 FRONTEND_BASE = os.environ.get("FRONTEND_BASE", "http://localhost:3000")
+
+# URL base del servicio en ngrok (producción)
+# IMPORTANTE: Esta URL debe estar registrada en Google Cloud Console como redirect URI autorizado
+NGROK_BASE_URL = "https://lilah-tophaceous-overhonestly.ngrok-free.dev"
+OAUTH_REDIRECT_URI_DEFAULT = f"{NGROK_BASE_URL}/auth/gmail/callback"
 # -----------------
 
 # Aquí simulamos un storage simple. En producción usá DB.
@@ -54,10 +59,13 @@ for path in glob.glob("token_*.json"):
 # --- OAuth endpoints (web server flow) ---
 @app.get("/auth/gmail/start")
 def auth_start(state: str = "app"):
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", OAUTH_REDIRECT_URI_DEFAULT)
+    logger.info(f"🔐 Iniciando OAuth con redirect_uri: {redirect_uri}")
+    
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8000/auth/gmail/callback"),
+        redirect_uri=redirect_uri,
     )
     auth_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
     return RedirectResponse(auth_url)
@@ -65,37 +73,51 @@ def auth_start(state: str = "app"):
 
 @app.get("/auth/gmail/callback")
 def auth_callback(code: str):
-    flow = Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE,
-        scopes=SCOPES,
-        redirect_uri=os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8000/auth/gmail/callback"),
-    )
-    flow.fetch_token(code=code)
-    creds = flow.credentials
+    redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", OAUTH_REDIRECT_URI_DEFAULT)
+    logger.info(f"🔐 Callback OAuth recibido con redirect_uri: {redirect_uri}")
+    
+    try:
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+        flow.fetch_token(code=code)
+        creds = flow.credentials
 
-    service = build_gmail_service(creds)
-    profile = service.users().getProfile(userId="me").execute()
-    email = profile.get("emailAddress")
+        service = build_gmail_service(creds)
+        profile = service.users().getProfile(userId="me").execute()
+        email = profile.get("emailAddress")
 
-    token_info = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
-    }
+        token_info = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+        }
 
-    USERS[email] = {"token_info": token_info}
+        USERS[email] = {"token_info": token_info}
 
-    resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", label_ids=["INBOX"])
-    USERS[email]["last_history_id"] = int(resp["historyId"])
+        resp = create_watch(service, "projects/unir-gmail/topics/gmail_notifications", label_ids=["INBOX"])
+        USERS[email]["last_history_id"] = int(resp["historyId"])
 
-    # 🔹 Guarda el token en un archivo para persistencia
-    with open(f"token_{email}.json", "w") as f:
-        json.dump(token_info, f)
+        # 🔹 Guarda el token en un archivo para persistencia
+        with open(f"token_{email}.json", "w") as f:
+            json.dump(token_info, f)
 
-    return {"status": "ok", "email": email, "creds": token_info}
+        logger.info(f"✅ OAuth exitoso para {email}")
+        
+        # Redirigir al frontend con parámetro de éxito
+        frontend_redirect = f"{FRONTEND_BASE}/linkedAccounts?gmail_connected=true&email={email}"
+        return RedirectResponse(url=frontend_redirect)
+        
+    except Exception as e:
+        logger.error(f"❌ Error en callback OAuth: {str(e)}")
+        # Redirigir al frontend con error
+        frontend_redirect = f"{FRONTEND_BASE}/linkedAccounts?gmail_connected=false&error={str(e)}"
+        return RedirectResponse(url=frontend_redirect)
 
 
 
@@ -192,17 +214,41 @@ def handle_notification(email: str, history_id: int):
 
 
 
-# --- Endpoint para enviar mail (ejemplo) ---
+
+# --- Endpoint para enviar mail (acepta formato Core y EmailRequest) ---
 @app.post("/send/gmail")
-def send_gmail(req: EmailRequest):
-    email = req.email
-    to = req.to
-    subject = req.subject
-    body = req.body
-    # buscar user creds (ejemplo simple: email es quien autoriza)
+def send_gmail(req: dict):
+    """Acepta ambos formatos:
+    - Core API: {"to", "message", "message_type", ["email"], ["subject"]}
+    - EmailRequest: {"email", "to", "subject", "body"}
+    """
+    # Campos básicos
+    to = req.get("to")
+    if not to:
+        raise HTTPException(400, "'to' is required")
+
+    # message puede venir como 'message' (Core) o 'body' (EmailRequest)
+    body = req.get("message") or req.get("body") or ""
+    # subject opcional
+    subject = req.get("subject") or "Mensaje desde Unir"
+
+    # Seleccionar remitente: primero 'email' en el payload, luego DEFAULT_GMAIL_SENDER, luego primer USERS
+    email = req.get("email")
+    if not email:
+        default_sender = os.environ.get("DEFAULT_GMAIL_SENDER")
+        if default_sender and default_sender in USERS:
+            email = default_sender
+            logger.info(f"📧 Usando DEFAULT_GMAIL_SENDER: {email}")
+        elif USERS:
+            email = next(iter(USERS.keys()))
+            logger.info(f"📧 Usando cuenta por defecto disponible: {email}")
+        else:
+            raise HTTPException(400, "'email' is required and no authorized gmail account available to send")
+
+    # validar credenciales
     info = USERS.get(email)
     if not info:
-        raise HTTPException(404, "user not authorized")
+        raise HTTPException(404, f"user {email} not authorized")
 
     creds = load_credentials_from_token(info["token_info"])
     service = build_gmail_service(creds)

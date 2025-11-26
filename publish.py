@@ -2,7 +2,7 @@ import httpx
 import logging
 
 def forward_to_core(normalized_message):
-    core_url = "http://100.24.77.57:8003/api/v1/messages/unified" # modificar por la URL deployada
+    core_url = "https://dawne-umbellately-annett.ngrok-free.dev/api/v1/messages/unified" # modificar por la URL deployada
 
     unified_message = {
         "channel": normalized_message.get("channel"),
